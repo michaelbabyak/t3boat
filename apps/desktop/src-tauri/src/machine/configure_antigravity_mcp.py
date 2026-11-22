@@ -20,7 +20,8 @@ Targets every Antigravity config file present under `HOME`:
   - `~/.gemini/antigravity/mcp_config.json` (updated if present)
   - `~/.t3/userdata/providers/antigravity/*/config/mcp_config.json` (updated if present)
 
-Creates a `.bak.<utc>` backup before modifying any existing file (never deletes files).
+In local mode, creates a 0600 `.bak.<utc>` backup before modifying an existing file
+(cloud mode omits backups so stripped/cross-tenant configs are never retained on disk).
 Stdlib only.
 """
 import argparse
@@ -240,8 +241,9 @@ def apply_config(home, mode, bridge_path, office_env="babyak-lab", helper_path=N
             forbidden_markers = []
             if office_env not in ("poppy", "poppy-performance"):
                 forbidden_markers.extend((
-                    "datawarehouse", "poppy-dw", "poppy-data-warehouse",
-                    "server-postgres", "postgresql://", "postgres://",
+                    "datawarehouse", "data-warehouse", "data_warehouse",
+                    "poppy-dw", "poppy_dw", "poppy-data-warehouse", "poppy_data_warehouse",
+                    "postgres",
                 ))
             if office_env != "territory":
                 forbidden_markers.extend((

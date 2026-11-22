@@ -23,6 +23,11 @@ if ! command -v agy >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/agy" ]; then
     exit 1
   fi
 fi
+if ! command -v agy >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/agy" ]; then
+  echo "Antigravity CLI (agy) was not found after install" >&2
+  tail -n 40 "$boat_dir/agy-install.log" >&2 || true
+  exit 1
+fi
 wrangler_major="$(wrangler --version 2>/dev/null | grep -Eo '[0-9]+' | head -n 1 || echo 0)"
 if [ "${wrangler_major:-0}" -lt 4 ] && command -v npm >/dev/null 2>&1; then
   pfx=/usr/local

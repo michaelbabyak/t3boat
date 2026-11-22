@@ -509,7 +509,6 @@ fn register_antigravity_in(home: &std::path::Path) -> Result<()> {
     let want = url();
     for path in antigravity_mcp_paths(home) {
         let mut data: Value = match std::fs::read_to_string(&path) {
-            Ok(s) if s.trim().is_empty() => json!({}),
             Ok(s) => serde_json::from_str(&s)
                 .with_context(|| format!("parsing {}", path.display()))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
@@ -702,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_mcp_registration_refuses_corrupt_or_non_utf8_config() {
+    fn antigravity_mcp_registration_refuses_corrupt_blank_or_non_utf8_config() {
         let tmp = std::env::temp_dir().join(format!("t3boat-agy-bad-{}", crate::proxy::auth::random_token()));
         let primary = tmp.join(".gemini/config/mcp_config.json");
         std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
@@ -710,6 +709,10 @@ mod tests {
         std::fs::write(&primary, bad_bytes).unwrap();
         assert!(register_antigravity_in(&tmp).is_err());
         assert_eq!(std::fs::read(&primary).unwrap(), bad_bytes);
+        // Existing zero-byte / whitespace-only file is invalid JSON and must not be overwritten.
+        std::fs::write(&primary, "   \n").unwrap();
+        assert!(register_antigravity_in(&tmp).is_err());
+        assert_eq!(std::fs::read_to_string(&primary).unwrap(), "   \n");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
