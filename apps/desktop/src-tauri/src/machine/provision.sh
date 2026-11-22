@@ -16,15 +16,23 @@ mkdir -p "$boat_dir" "$units" "$HOME/.t3/userdata"
 chmod 700 "$boat_dir"
 
 # Antigravity CLI (agy) + Cloudflare wrangler@4 (binary only, no credentials) + secret-free MCP parity.
-if ! command -v agy >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/agy" ]; then
+has_agy() {
+  local p
+  p="$(type -P agy 2>/dev/null || true)"
+  if [ -n "$p" ] && [ -f "$p" ] && [ -x "$p" ]; then
+    return 0
+  fi
+  [ -f "$HOME/.local/bin/agy" ] && [ -x "$HOME/.local/bin/agy" ]
+}
+if ! has_agy; then
   if ! curl -fsSL https://antigravity.google/cli/install.sh | bash >"$boat_dir/agy-install.log" 2>&1; then
     echo "Antigravity CLI (agy) install failed" >&2
     tail -n 40 "$boat_dir/agy-install.log" >&2 || true
     exit 1
   fi
 fi
-if ! command -v agy >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/agy" ]; then
-  echo "Antigravity CLI (agy) was not found after install" >&2
+if ! has_agy; then
+  echo "Antigravity CLI (agy) executable was not found after install" >&2
   tail -n 40 "$boat_dir/agy-install.log" >&2 || true
   exit 1
 fi
@@ -67,7 +75,7 @@ if [ "$("$t3" --version 2>/dev/null || true)" != "t3 v$version" ]; then
   restart_t3=1
 fi
 agy_present=0
-if command -v agy >/dev/null 2>&1 || [ -x "$HOME/.local/bin/agy" ]; then
+if has_agy; then
   agy_present=1
 fi
 settings="$HOME/.t3/userdata/settings.json"
