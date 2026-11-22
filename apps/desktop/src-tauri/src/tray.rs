@@ -3,7 +3,7 @@
 
 use crate::app::{self, App, Costs, MachineState, MachineView, Setup};
 use crate::boat::Boat;
-use crate::machine::provision::{SizeInfo, SIZES};
+use crate::machine::provision::{DeskPreset, SizeInfo, PRESETS, SIZES};
 use crate::machine::Event;
 use crate::mcp;
 use crate::store::Settings;
@@ -32,6 +32,7 @@ struct Ui {
     app: Mutex<Option<Arc<App>>>,
     setup: Mutex<SetupState>,
     account: Mutex<Option<Account>>,
+    environments: Mutex<Vec<String>>,
     mcp: Mutex<McpStatus>,
     /// No tray to open the panel from, so it is an ordinary window: see `follow_tray_host`.
     windowed: AtomicBool,
@@ -45,14 +46,19 @@ struct Ui {
 struct McpStatus {
     claude_code: Option<bool>,
     codex: Option<bool>,
+    antigravity: Option<bool>,
 }
 
 async fn mcp_status() -> McpStatus {
     let status = |client| async move {
         if mcp::installed(client).await { Some(mcp::registered(client).await) } else { None }
     };
-    let (claude_code, codex) = tokio::join!(status(mcp::Client::ClaudeCode), status(mcp::Client::Codex));
-    McpStatus { claude_code, codex }
+    let (claude_code, codex, antigravity) = tokio::join!(
+        status(mcp::Client::ClaudeCode),
+        status(mcp::Client::Codex),
+        status(mcp::Client::Antigravity),
+    );
+    McpStatus { claude_code, codex, antigravity }
 }
 
 async fn refresh_mcp(handle: &AppHandle) {
@@ -88,6 +94,8 @@ struct UiState {
     costs: Costs,
     settings: Settings,
     sizes: &'static [SizeInfo],
+    presets: &'static [DeskPreset],
+    environments: Vec<String>,
     mcp: McpStatus,
 }
 
@@ -108,6 +116,8 @@ impl Ui {
             costs: app.as_ref().map(|a| a.costs()).unwrap_or_default(),
             settings: app.as_ref().map(|a| a.settings()).unwrap_or_default(),
             sizes: SIZES,
+            presets: PRESETS,
+            environments: self.environments.lock().unwrap().clone(),
             mcp: self.mcp.lock().unwrap().clone(),
         }
     }
@@ -179,6 +189,9 @@ async fn refresh_account(handle: &AppHandle, boat: &Boat) {
     let ui = handle.state::<Ui>();
     if let Ok(a) = boat.account().await {
         *ui.account.lock().unwrap() = Some(Account { identifier: a.identifier, plan: a.plan });
+    }
+    if let Ok(envs) = boat.environments().await {
+        *ui.environments.lock().unwrap() = envs;
     }
 }
 
@@ -394,8 +407,25 @@ fn get_state(ui: State<'_, Ui>) -> UiState {
 }
 
 #[tauri::command]
-async fn create_machine(ui: State<'_, Ui>, name: String, size: String, projects: Option<Vec<String>>) -> Res {
-    ui.app()?.create_machine(&name, &size, projects.unwrap_or_default()).await.map(drop).map_err(err)
+async fn create_machine(
+    ui: State<'_, Ui>,
+    name: String,
+    size: String,
+    environment: Option<String>,
+    snapshot: Option<String>,
+    projects: Option<Vec<String>>,
+) -> Res {
+    ui.app()?
+        .create_machine(
+            &name,
+            &size,
+            environment.as_deref(),
+            snapshot.as_deref(),
+            projects.unwrap_or_default(),
+        )
+        .await
+        .map(drop)
+        .map_err(err)
 }
 
 /// This computer's T3 projects that can go to a machine.

@@ -28,11 +28,23 @@ function CodexLogo() {
   );
 }
 
-/** Keyed by the names the UI shows: Settings' "Claude Code", the backend's "Claude" and "Codex". */
+function AntigravityLogo() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden>
+      <path
+        fill="#4285F4"
+        d="M12 2L3 20h4.2l4.8-9.8L16.8 20H21L12 2zm0 11.4L9.4 19h5.2L12 13.4z"
+      />
+    </svg>
+  );
+}
+
+/** Keyed by the names the UI shows: Settings' "Claude Code", the backend's "Claude", "Codex", and "Antigravity". */
 const LOGOS: Record<string, ComponentType> = {
   Claude: ClaudeCodeLogo,
   "Claude Code": ClaudeCodeLogo,
   Codex: CodexLogo,
+  Antigravity: AntigravityLogo,
 };
 
 export function AgentName({ name }: { name: string }) {

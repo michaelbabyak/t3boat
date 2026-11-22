@@ -107,7 +107,17 @@ function seed(): UiState {
     machines: structuredClone(machines),
     costs: { today: 0.42, month: 12.8, startsToday: 3, startsLimit: 50 },
     settings: { startAtLogin: true },
-    mcp: params.get("mcp") === "mixed" ? { claudeCode: true, codex: null } : { claudeCode: false, codex: false },
+    mcp:
+      params.get("mcp") === "mixed"
+        ? { claudeCode: true, codex: null, antigravity: false }
+        : { claudeCode: false, codex: false, antigravity: false },
+    presets: [
+      { id: "poppy", label: "Poppy Desk", defaultName: "poppy-desk", size: "large", environment: "poppy", snapshot: "t3-poppy-v3", summary: "Poppy env · video/QA + Antigravity" },
+      { id: "territory", label: "Territory Desk", defaultName: "territory-desk", size: "large", environment: "territory", snapshot: "t3-territory-v2", summary: "Territory env · brand-walled · video/QA" },
+      { id: "babyak-lab", label: "Lab Desk", defaultName: "lab-desk", size: "default", environment: "t3-babyak-lab", snapshot: "t3-babyak-lab-v2", summary: "Babyak Lab overseer env · Antigravity" },
+      { id: "custom", label: "Base / Custom", defaultName: "", size: "default", environment: null, snapshot: null, summary: "Default Boat env · clean sandbox" },
+    ],
+    environments: ["base", "poppy", "territory", "t3-babyak-lab"],
     sizes: [
       { id: "small", spec: "2 vCPU · 4 GB", hourly: 0.018 },
       { id: "default", spec: "4 vCPU · 8 GB", hourly: 0.036 },
@@ -159,9 +169,18 @@ function create(): MockBackend {
   const handlers: { [C in CommandName]: (a: CommandArgs<C>) => Promise<unknown> } = {
     get_state: async () => structuredClone(state),
 
-    async create_machine({ name, size, projects }) {
+    async create_machine({ name, size, environment, snapshot, projects }) {
       if (state.machines.some((m) => m.name === name)) throw `a machine called "${name}" already exists`;
-      const row = machine({ id: "", name, size, state: "creating", detail: "Creating sandbox…", paired: false });
+      const row = machine({
+        id: "",
+        name,
+        size,
+        environment: environment ?? null,
+        baseSnapshot: snapshot ?? null,
+        state: "creating",
+        detail: "Creating sandbox…",
+        paired: false,
+      });
       state.machines = [...state.machines, row];
       emit();
       const steps = ["Creating sandbox…", "Installing T3 server…", "Starting T3 server…", "Asking T3 Code to add it…"];
@@ -305,10 +324,12 @@ function create(): MockBackend {
       const costToday = (awake / 3600) * (size?.hourly ?? 0);
       return {
         id,
+        environment: m.environment ?? null,
+        baseSnapshot: m.baseSnapshot ?? null,
         costToday,
         costMonth: extra.month + costToday,
         awakeSecsToday: awake,
-        agents: ["Claude", "Codex"].map((name) => ({ name, signedIn: !m.signedOut.includes(name) })),
+        agents: ["Claude", "Codex", "Antigravity"].map((name) => ({ name, signedIn: !m.signedOut.includes(name) })),
         t3Version: "0.0.21",
         createdAt: Math.floor(Date.now() / 1000) - extra.days * 86400,
         connect: connectOn.has(id),

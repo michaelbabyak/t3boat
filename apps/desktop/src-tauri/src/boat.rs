@@ -122,14 +122,34 @@ impl Boat {
         Ok(serde_json::from_value(v["account"].clone())?)
     }
 
-    /// Returns the new sandbox's id. `snapshot`: the saved snapshot its disk starts from.
-    pub async fn create(&self, name: &str, size: &str, snapshot: Option<&str>) -> Result<String> {
+    /// Returns the new sandbox's id.
+    /// `environment`: Boat environment name (domain / secret boundary), if other than default.
+    /// `snapshot`: saved snapshot its disk starts from.
+    pub async fn create(
+        &self,
+        name: &str,
+        size: &str,
+        environment: Option<&str>,
+        snapshot: Option<&str>,
+    ) -> Result<String> {
         let mut args = vec!["new", "--name", name, "--type", size, "--no-auto-stop"];
-        args.extend(snapshot.into_iter().flat_map(|s| ["--from", s]));
+        args.extend(environment.filter(|e| !e.is_empty()).into_iter().flat_map(|e| ["--environment", e]));
+        args.extend(snapshot.filter(|s| !s.is_empty()).into_iter().flat_map(|s| ["--from", s]));
         let out = self.run(&args, Duration::from_secs(300)).await?;
         let v = Self::last_json(&out)?;
         let id = v["id"].as_str().ok_or_else(|| anyhow!("boat new returned no id"))?;
         Ok(id.to_owned())
+    }
+
+    /// Names of Boat environments configured on this account.
+    pub async fn environments(&self) -> Result<Vec<String>> {
+        let v = Self::last_json(&self.run(&["env", "list"], Duration::from_secs(20)).await?)?;
+        Ok(v["environments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e["name"].as_str().map(str::to_owned))
+            .collect())
     }
 
     pub async fn info(&self, id: &str) -> Result<Sandbox> {
@@ -161,6 +181,12 @@ impl Boat {
 
     pub async fn delete_snapshot(&self, name: &str) -> Result<()> {
         self.run(&["snapshot", "rm", name], Duration::from_secs(60)).await.map(drop)
+    }
+
+    pub async fn stop(&self, id: &str) -> Result<()> {
+        self.run(&["stop", id], Duration::from_secs(120))
+            .await
+            .map(drop)
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {

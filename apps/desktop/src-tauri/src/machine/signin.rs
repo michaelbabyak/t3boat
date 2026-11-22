@@ -5,16 +5,17 @@
 
 use super::MachineRuntime;
 use crate::proxy::upstream;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use std::time::{Duration, Instant};
 
 const URL_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Agent {
     Claude,
     Codex,
+    Antigravity,
 }
 
 impl Agent {
@@ -23,6 +24,7 @@ impl Agent {
         match name {
             "Claude" => Some(Self::Claude),
             "Codex" => Some(Self::Codex),
+            "Antigravity" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -31,6 +33,8 @@ impl Agent {
         match self {
             Self::Claude => "claude auth login",
             Self::Codex => "codex login",
+            // Enforce Google OAuth subscription only (never API keys).
+            Self::Antigravity => "env -u GEMINI_API_KEY -u GOOGLE_API_KEY agy -p \"Reply ONLY: OK\"",
         }
     }
 
@@ -39,7 +43,15 @@ impl Agent {
         match self {
             Self::Claude => "claude auth status >/dev/null 2>&1",
             Self::Codex => "codex login status >/dev/null 2>&1",
+            Self::Antigravity => "env -u GEMINI_API_KEY -u GOOGLE_API_KEY agy models >/dev/null 2>&1",
         }
+    }
+
+    /// Claude and Codex bind a localhost callback port that must be forwarded back to this Mac.
+    /// Antigravity uses Google's hosted callback (`https://antigravity.google/oauth-callback`)
+    /// and polls for completion, so no localhost port forward is required.
+    fn needs_local_callback(self) -> bool {
+        !matches!(self, Self::Antigravity)
     }
 }
 
@@ -48,14 +60,16 @@ impl MachineRuntime {
         self.ensure_awake().await?;
         let id = self.sandbox_id();
         let boat = &self.shared.boat;
-        // The CLI hands the sign-in URL to $BROWSER; this one records it instead.
+        // The CLI hands the sign-in URL to $BROWSER (or prints it to stdout in headless mode).
+        // Record the exact spawned PID so cleanup only terminates this sign-in attempt.
         let dir = boat
             .exec_ok(
                 &id,
                 &format!(
-                    "d=$(mktemp -d); printf '#!/bin/sh\\necho \"$1\" > %s/url\\n' \"$d\" > \"$d/browser\"; \
+                    "export PATH=\"$HOME/.local/bin:/usr/local/bin:$PATH\"; \
+                     d=$(mktemp -d); printf '#!/bin/sh\\necho \"$1\" > %s/url\\n' \"$d\" > \"$d/browser\"; \
                      chmod +x \"$d/browser\"; \
-                     BROWSER=\"$d/browser\" nohup script -qfec '{}' \"$d/log\" >/dev/null 2>&1 & echo \"$d\"",
+                     BROWSER=\"$d/browser\" nohup script -qfec '{}' \"$d/log\" >/dev/null 2>&1 & echo $! > \"$d/pid\"; echo \"$d\"",
                     agent.login()
                 ),
                 30,
@@ -65,7 +79,13 @@ impl MachineRuntime {
         // The machine must not fall asleep while the person is in the browser.
         let result = self.kept_awake(self.finish_sign_in(agent, &dir)).await;
         let _ = boat
-            .exec(&id, &format!("rm -rf '{dir}'; pkill -f '{}'", agent.login()), 30)
+            .exec(
+                &id,
+                &format!(
+                    "if [ -f '{dir}/pid' ]; then pid=$(cat '{dir}/pid'); pkill -P \"$pid\" 2>/dev/null || true; kill \"$pid\" 2>/dev/null || true; fi; rm -rf '{dir}'"
+                ),
+                30,
+            )
             .await;
         result?;
         // T3 re-checks the provider and tells T3 Code; the sign-in nudge goes away with it, and
@@ -89,24 +109,41 @@ impl MachineRuntime {
         let boat = &self.shared.boat;
         let started = Instant::now();
         let url = loop {
-            let out = boat.exec(&id, &format!("cat '{dir}/url' 2>/dev/null"), 30).await?;
-            if let Some(url) = out.stdout.split_whitespace().find(|w| w.starts_with("https://")) {
-                break url.to_owned();
+            let out = boat
+                .exec(&id, &format!("cat '{dir}/url' '{dir}/log' 2>/dev/null"), 30)
+                .await?;
+            if let Some(url) = extract_https_url(&out.stdout) {
+                break url;
             }
             if started.elapsed() > URL_TIMEOUT {
                 bail!("the {agent:?} login did not start on the machine");
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
         };
-        let port = callback_port(&url).ok_or_else(|| anyhow!("the {agent:?} login has no local callback"))?;
-        let _forward = boat
-            .forward(&id, port)
-            .await
-            .with_context(|| format!("forwarding port {port} for the {agent:?} login"))?;
+        let _forward = match callback_port(&url) {
+            Some(port) => Some(
+                boat.forward(&id, port)
+                    .await
+                    .with_context(|| format!("forwarding port {port} for the {agent:?} login"))?,
+            ),
+            None if agent.needs_local_callback() => {
+                bail!("the {agent:?} login has no local callback");
+            }
+            None => None,
+        };
         crate::app::open_url(&url)?;
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
-            if boat.exec(&id, agent.status(), 30).await?.exit_code == Some(0) {
+            if boat
+                .exec(
+                    &id,
+                    &format!("export PATH=\"$HOME/.local/bin:/usr/local/bin:$PATH\"; {}", agent.status()),
+                    30,
+                )
+                .await?
+                .exit_code
+                == Some(0)
+            {
                 return Ok(());
             }
             if started.elapsed() > LOGIN_TIMEOUT {
@@ -114,6 +151,21 @@ impl MachineRuntime {
             }
         }
     }
+}
+
+/// Extracts the first `https://...` URL from `$BROWSER` output or PTY log, trimming ANSI/control noise.
+fn extract_https_url(text: &str) -> Option<String> {
+    for token in text.split_whitespace() {
+        let Some(start) = token.find("https://") else { continue };
+        let clean: String = token[start..]
+            .chars()
+            .take_while(|c| !c.is_control() && !matches!(c, '"' | '\'' | '<' | '>' | ')'))
+            .collect();
+        if url::Url::parse(&clean).is_ok() {
+            return Some(clean);
+        }
+    }
+    None
 }
 
 /// The port of a `redirect_uri=http://localhost:<port>/...` (or 127.0.0.1) parameter.
@@ -127,15 +179,24 @@ fn callback_port(url: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::callback_port;
+    use super::{callback_port, extract_https_url, Agent};
 
     #[test]
     fn finds_the_local_callback_port() {
         let claude = "https://claude.com/cai/oauth/authorize?code=true&redirect_uri=http%3A%2F%2Flocalhost%3A43327%2Fcallback&state=x";
         let codex = "https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback";
         let manual = "https://claude.com/cai/oauth/authorize?redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback";
+        let agy = "https://accounts.google.com/o/oauth2/auth?redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&state=abc";
         assert_eq!(callback_port(claude), Some(43327));
         assert_eq!(callback_port(codex), Some(1455));
         assert_eq!(callback_port(manual), None);
+        assert_eq!(callback_port(agy), None);
+        assert_eq!(Agent::from_name("Antigravity"), Some(Agent::Antigravity));
+        assert!(!Agent::Antigravity.needs_local_callback());
+        assert!(Agent::Claude.needs_local_callback());
+        assert_eq!(
+            extract_https_url("Authentication required.\r\n  https://accounts.google.com/o/oauth2/auth?state=1\x1b[0m\r\n"),
+            Some("https://accounts.google.com/o/oauth2/auth?state=1".to_owned())
+        );
     }
 }

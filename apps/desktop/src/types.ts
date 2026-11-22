@@ -17,6 +17,8 @@ export interface MachineView {
   id: string;
   name: string;
   size: string;
+  environment?: string | null;
+  baseSnapshot?: string | null;
   state: MachineState;
   detail: string;
   countdown: Countdown | null; // set while `detail` counts down
@@ -59,7 +61,17 @@ export interface Size {
   hourly: number;
 }
 
-export type McpClient = "claudeCode" | "codex";
+export interface DeskPreset {
+  id: string;
+  label: string;
+  defaultName: string;
+  size: string;
+  environment: string | null;
+  snapshot: string | null;
+  summary: string;
+}
+
+export type McpClient = "claudeCode" | "codex" | "antigravity";
 
 export interface UiState {
   setup: Setup;
@@ -71,12 +83,16 @@ export interface UiState {
   costs: { today: number; month: number; startsToday: number; startsLimit: number };
   settings: Settings;
   sizes: Size[];
+  presets: DeskPreset[];
+  environments: string[];
   /** null = that CLI isn't installed */
   mcp: Record<McpClient, boolean | null>;
 }
 
 export interface MachineDetails {
   id: string;
+  environment?: string | null;
+  baseSnapshot?: string | null;
   costToday: number;
   costMonth: number;
   awakeSecsToday: number;
@@ -91,7 +107,10 @@ export type SetupAction = "installBoat" | "signInBoat" | "installT3" | "recheck"
 
 export interface Commands {
   get_state: [undefined, UiState];
-  create_machine: [{ name: string; size: string; projects?: string[] }, void]; // projects: LocalProject ids to add once up
+  create_machine: [
+    { name: string; size: string; environment?: string | null; snapshot?: string | null; projects?: string[] },
+    void,
+  ]; // projects: LocalProject ids to add once up
   local_projects: [undefined, LocalProject[]]; // pinned first, then most recent
   add_project: [{ id: string; projectId: string }, void]; // resolves once cloned
   wake_machine: [{ id: string }, void];

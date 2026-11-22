@@ -61,6 +61,8 @@ pub struct MachineView {
     pub id: String,
     pub name: String,
     pub size: String,
+    pub environment: Option<String>,
+    pub base_snapshot: Option<String>,
     pub state: MachineState,
     pub detail: String,
     /// Set while `detail` counts down, so the UI can tick it between updates.
@@ -119,6 +121,9 @@ pub struct Costs {
 /// A machine being created: it holds its name and local port until it exists.
 struct Creating {
     name: String,
+    size: String,
+    environment: Option<String>,
+    base_snapshot: Option<String>,
     step: String,
     port: u16,
     /// Its Boat sandbox, once there is one.
@@ -184,29 +189,34 @@ impl App {
         for record in state.machines {
             app.spawn(app.runtime(record));
         }
-        tokio::spawn(app.clone().delete_leftover_sandboxes());
+        tokio::spawn(app.clone().stop_leftover_sandboxes());
         Ok(app)
     }
 
-    async fn delete_leftover_sandboxes(self: Arc<Self>) {
+    async fn stop_leftover_sandboxes(self: Arc<Self>) {
         let sandboxes = self.leftover_sandboxes.lock().unwrap().clone();
         for id in sandboxes {
-            self.delete_leftover(&id).await;
+            self.stop_leftover(&id).await;
         }
     }
 
-    /// Unfinished, unlisted and billed without limit: deleted, or the user told. Kept until Boat
-    /// confirms it gone, so the next launch tries again.
-    async fn delete_leftover(&self, id: &str) {
+    /// Offices safety guardrail: never delete sandboxes automatically on failed/interrupted creates.
+    /// Stop the sandbox so it costs $0 and notify the user with its ID for manual removal if desired.
+    async fn stop_leftover(&self, id: &str) {
         let boat = &self.shared.boat;
-        if let Err(e) = boat.delete(id).await {
+        if let Err(e) = boat.stop(id).await {
             if !boat.confirmed_gone(id).await {
                 self.shared.notify(
-                    "A sandbox may be left on Boat",
-                    format!("Couldn't delete {id} from an unfinished create ({e:#}); delete it with `boat delete {id}`"),
+                    "Unfinished sandbox still running on Boat",
+                    format!("Couldn't stop {id} from an unfinished create ({e:#}); stop it with `boat stop {id}`"),
                 );
                 return;
             }
+        } else {
+            self.shared.notify(
+                "Stopped unfinished sandbox",
+                format!("Stopped {id} from an unfinished create (not deleted per Offices safety policy)."),
+            );
         }
         self.leftover_sandboxes.lock().unwrap().retain(|s| s != id);
         self.shared.persist();
@@ -281,7 +291,13 @@ impl App {
 
     /// Claims the name and a local port for a new machine, so concurrent creates never share
     /// either.
-    fn reserve(&self, name: &str) -> Result<u16> {
+    fn reserve(
+        &self,
+        name: &str,
+        size: &str,
+        environment: Option<&str>,
+        base_snapshot: Option<&str>,
+    ) -> Result<u16> {
         let mut creating = self.creating.lock().unwrap();
         let records: Vec<_> = self.machines().iter().map(|m| m.record()).collect();
         let names = records.iter().map(|m| &m.name).chain(creating.iter().map(|c| &c.name));
@@ -298,7 +314,15 @@ impl App {
         let port = (FIRST_PORT..FIRST_PORT + PORTS)
             .find(|p| !used.contains(p) && std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
             .ok_or_else(|| anyhow!("no free local port"))?;
-        creating.push(Creating { name: name.to_owned(), step: "Preparing".into(), port, sandbox: None });
+        creating.push(Creating {
+            name: name.to_owned(),
+            size: size.to_owned(),
+            environment: environment.map(str::to_owned),
+            base_snapshot: base_snapshot.map(str::to_owned),
+            step: "Preparing".into(),
+            port,
+            sandbox: None,
+        });
         Ok(port)
     }
 
@@ -318,11 +342,20 @@ impl App {
     }
 
     /// Creates a machine, then adds this computer's T3 projects `projects` (ids) to it.
-    pub async fn create_machine(self: &Arc<Self>, name: &str, size: &str, projects: Vec<String>) -> Result<Arc<MachineRuntime>> {
+    pub async fn create_machine(
+        self: &Arc<Self>,
+        name: &str,
+        size: &str,
+        environment: Option<&str>,
+        base_snapshot: Option<&str>,
+        projects: Vec<String>,
+    ) -> Result<Arc<MachineRuntime>> {
         if !valid_name(name) {
             bail!("machine names are 1-32 lowercase letters, digits or dashes, starting with a letter or digit");
         }
-        let port = self.reserve(name)?;
+        let environment = environment.map(str::trim).filter(|s| !s.is_empty());
+        let base_snapshot = base_snapshot.map(str::trim).filter(|s| !s.is_empty());
+        let port = self.reserve(name, size, environment, base_snapshot)?;
         self.shared.changed();
         let result = async {
             let version = self.shared.t3.version().await?;
@@ -330,6 +363,8 @@ impl App {
                 &self.shared.boat,
                 name,
                 size,
+                environment,
+                base_snapshot,
                 &version,
                 port,
                 |sandbox| self.set_creating_sandbox(name, sandbox),
@@ -356,7 +391,7 @@ impl App {
         self.shared.persist();
         self.shared.changed();
         if let Some(id) = leftover {
-            self.delete_leftover(&id).await;
+            self.stop_leftover(&id).await;
         }
         let machine = result?;
         let (app, m) = (self.clone(), machine.clone());
@@ -468,7 +503,9 @@ impl App {
             views.push(MachineView {
                 id: String::new(),
                 name: c.name.clone(),
-                size: String::new(),
+                size: c.size.clone(),
+                environment: c.environment.clone(),
+                base_snapshot: c.base_snapshot.clone(),
                 state: MachineState::Creating,
                 detail: c.step.clone(),
                 countdown: None,
@@ -587,6 +624,8 @@ fn usage(spend: &Spend, day: i64, month: i64) -> MachineUsage {
 #[serde(rename_all = "camelCase")]
 pub struct MachineDetails {
     pub id: String,
+    pub environment: Option<String>,
+    pub base_snapshot: Option<String>,
     pub cost_today: f64,
     pub cost_month: f64,
     pub awake_secs_today: u64,
@@ -614,6 +653,8 @@ impl App {
         let agents = machine.cache.lock().unwrap().agents();
         Ok(MachineDetails {
             id,
+            environment: record.environment,
+            base_snapshot: record.base_snapshot,
             cost_today: usage.today,
             cost_month: usage.month,
             awake_secs_today: usage.awake_secs_today,
@@ -688,6 +729,8 @@ fn view(m: &MachineRuntime) -> MachineView {
         id: r.id.clone(),
         name: r.name.clone(),
         size: r.size.clone(),
+        environment: r.environment.clone(),
+        base_snapshot: r.base_snapshot.clone(),
         state,
         detail,
         countdown,

@@ -89,6 +89,12 @@ export function MachineDetails({
           {d ? (
             <>
               <span>T3 {d.t3Version}</span>
+              {d.baseSnapshot ? (
+                <>
+                  <span className="sep">·</span>
+                  <span>{d.baseSnapshot}</span>
+                </>
+              ) : null}
               <span className="sep">·</span>
               <span>created {shortDate(d.createdAt)}</span>
               <span className="sep">·</span>
@@ -143,6 +149,7 @@ function Glance({ m, size, d }: { m: MachineView; size: Size | undefined; d: Det
           {rest.length ? <span className="glance-detail">{rest.join(" · ")}</span> : null}
           <span className="glance-spec">
             <span className="chip">{m.size}</span>
+            {m.environment ? <span className="chip">{m.environment}</span> : null}
             {size ? (
               <>
                 <span>{size.spec}</span>

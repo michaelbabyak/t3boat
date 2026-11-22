@@ -32,6 +32,9 @@ const WAIT: Duration = Duration::from_secs(40);
 const INSTRUCTIONS: &str = "t3boat runs remote T3 Code machines (Boat sandboxes) for the user. \
 Machines sleep on their own when no agent works and wake when used; the user pays per minute awake. \
 Address a machine by its name or id from list_machines. \
+create_machine supports optional Boat `environment` (e.g. poppy, territory, t3-babyak-lab) and \
+`snapshot` (e.g. t3-poppy-v3, t3-territory-v2, t3-babyak-lab-v2) for domain-isolated Office desks. \
+delete_machine is intentionally disabled via MCP by Offices safety policy — use sleep_machine instead. \
 add_project puts one of the user's projects on a machine, as T3 Code's own \"Add to another machine\" \
 does. Each machine is also a linked environment of the user's T3 Code (t3_environment_links lists it): \
 work there with T3's own tools and that environmentId, e.g. delegate_task or t3_thread_launch.";
@@ -61,6 +64,8 @@ enum Call {
     CreateMachine {
         name: String,
         size: Option<String>,
+        environment: Option<String>,
+        snapshot: Option<String>,
         #[serde(default)]
         projects: Vec<String>,
     },
@@ -77,9 +82,10 @@ enum Call {
     OpenInT3 { machine: String },
     AddToT3 { machine: String },
     DeleteMachine {
-        machine: String,
-        #[serde(default)]
-        discard: bool,
+        #[serde(rename = "machine")]
+        _machine: String,
+        #[serde(default, rename = "discard")]
+        _discard: bool,
     },
 }
 
@@ -187,12 +193,16 @@ fn tool_list() -> Value {
         ),
         tool(
             "create_machine",
-            "Creates a new remote machine with T3 Code on it. Takes about a minute. When it is ready, \
-             T3 Code shows the user a dialog to add it as a backend; tell the user to confirm it there. \
-             `projects` (ids from list_projects) are then added to it as add_project does.",
+            "Creates a new remote machine with T3 Code and Antigravity on it. Takes about a minute. \
+             Pass `environment` (Boat domain environment, e.g. poppy, territory, t3-babyak-lab) and \
+             optional `snapshot` (e.g. t3-poppy-v3, t3-territory-v2, t3-babyak-lab-v2) for domain-isolated \
+             Office desks. When ready, T3 Code shows the user a dialog to add it as a backend; tell the \
+             user to confirm it there. `projects` (ids from list_projects) are then added to it.",
             json!({
                 "name": { "type": "string", "description": "Unique machine name" },
                 "size": size("Defaults to default"),
+                "environment": { "type": "string", "description": "Boat environment name (domain/secret boundary, e.g. poppy, territory, t3-babyak-lab)" },
+                "snapshot": { "type": "string", "description": "Optional Boat snapshot name to boot from (e.g. t3-poppy-v3, t3-territory-v2, t3-babyak-lab-v2)" },
                 "projects": { "type": "array", "items": { "type": "string" }, "description": "Project ids from list_projects" },
             }),
             &["name"],
@@ -256,7 +266,7 @@ fn tool_list() -> Value {
              The credential is created on the machine; this computer's logins are not touched.",
             json!({
                 "machine": machine,
-                "agent": { "type": "string", "enum": ["Claude", "Codex"] },
+                "agent": { "type": "string", "enum": ["Claude", "Codex", "Antigravity"] },
             }),
             &["machine", "agent"],
         ),
@@ -296,14 +306,6 @@ fn tool_list() -> Value {
             "Shows T3 Code's dialog to add this machine again (e.g. after the user removed it there); \
              the user confirms in T3 Code.",
             json!({ "machine": machine }),
-            &["machine"],
-        ),
-        tool(
-            "delete_machine",
-            "Permanently deletes a machine and everything on it, including work not pushed anywhere. Ask \
-             the user first. Refuses while an agent or build is working there; `discard: true` deletes \
-             anyway and loses that work.",
-            json!({ "machine": machine, "discard": { "type": "boolean", "description": "Delete even while work runs" } }),
             &["machine"],
         ),
     ])
@@ -353,8 +355,16 @@ impl Tools for App {
 async fn run(app: &Arc<App>, call: Call) -> Result<String> {
     Ok(match call {
         Call::ListMachines {} => json!({ "machines": app.views(), "costs": app.costs() }).to_string(),
-        Call::CreateMachine { name, size, projects } => {
-            let m = app.create_machine(&name, size.as_deref().unwrap_or("default"), projects).await?;
+        Call::CreateMachine { name, size, environment, snapshot, projects } => {
+            let m = app
+                .create_machine(
+                    &name,
+                    size.as_deref().unwrap_or("default"),
+                    environment.as_deref(),
+                    snapshot.as_deref(),
+                    projects,
+                )
+                .await?;
             format!(
                 "Created {} ({}). T3 Code now asks the user to add it as a backend; tell them to confirm.",
                 m.record().name,
@@ -392,7 +402,7 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
             format!("{} is set to {size}; it applies when it next wakes (right away if it was idle).", m.record().name)
         }
         Call::SignInAgent { machine, agent } => {
-            let a = Agent::from_name(&agent).ok_or_else(|| anyhow!("agent must be Claude or Codex"))?;
+            let a = Agent::from_name(&agent).ok_or_else(|| anyhow!("agent must be Claude, Codex, or Antigravity"))?;
             let m = app.machine(&machine)?;
             m.sign_in(a).await?;
             format!("{agent} is signed in on {}.", m.record().name)
@@ -421,16 +431,12 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
             app.pair(&m)?;
             format!("T3 Code now asks the user to add {}; tell them to confirm.", m.record().name)
         }
-        Call::DeleteMachine { machine, discard } => {
-            let m = app.machine(&machine)?;
-            let record = m.record();
-            app.delete_machine(&m, discard).await?;
-            let name = record.name;
-            if record.client_tokens.is_empty() {
-                format!("Deleted {name}.")
-            } else {
-                format!("Deleted {name}. T3 Code still lists it until the user removes it there, under Settings → Environments.")
-            }
+        Call::DeleteMachine { .. } => {
+            bail!(
+                "delete_machine is disabled via MCP by Offices safety policy \
+                 (never delete sandboxes or snapshots programmatically; use sleep_machine \
+                 or delete manually in the t3boat UI after explicit user confirmation)"
+            );
         }
     })
 }
@@ -441,6 +447,7 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
 pub enum Client {
     ClaudeCode,
     Codex,
+    Antigravity,
 }
 
 impl Client {
@@ -448,6 +455,7 @@ impl Client {
         match self {
             Self::ClaudeCode => "claude",
             Self::Codex => "codex",
+            Self::Antigravity => "agy",
         }
     }
 
@@ -455,22 +463,100 @@ impl Client {
         let args: &[&str] = match self {
             Self::ClaudeCode => &["mcp", "add", "--transport", "http", "--scope", "user", NAME],
             Self::Codex => &["mcp", "add", NAME, "--url"],
+            Self::Antigravity => &[],
         };
         args.iter().map(|a| a.to_string()).chain([url()]).collect()
     }
 }
 
-/// Whether the client's CLI is on this computer at all.
+/// Discovers Antigravity `mcp_config.json` files under `home` (primary `~/.gemini/config/mcp_config.json`
+/// plus any T3-managed provider configs).
+fn antigravity_mcp_paths(home: &std::path::Path) -> Vec<PathBuf> {
+    let mut paths = vec![home.join(".gemini").join("config").join("mcp_config.json")];
+    let legacy = home.join(".gemini").join("antigravity").join("mcp_config.json");
+    if legacy.exists() {
+        paths.push(legacy);
+    }
+    let providers = home.join(".t3").join("userdata").join("providers").join("antigravity");
+    if let Ok(entries) = std::fs::read_dir(providers) {
+        let mut extra: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path().join("config").join("mcp_config.json"))
+            .filter(|p| p.exists())
+            .collect();
+        extra.sort();
+        paths.extend(extra);
+    }
+    paths
+}
+
+fn antigravity_registered_in(home: &std::path::Path) -> bool {
+    let want = url();
+    let paths = antigravity_mcp_paths(home);
+    !paths.is_empty()
+        && paths.iter().all(|p| {
+            std::fs::read_to_string(p)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| v["mcpServers"][NAME]["url"].as_str().map(|u| u == want))
+                .unwrap_or(false)
+        })
+}
+
+fn register_antigravity_in(home: &std::path::Path) -> Result<()> {
+    static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let want = url();
+    for path in antigravity_mcp_paths(home) {
+        let mut data: Value = match std::fs::read_to_string(&path) {
+            Ok(s) if s.trim().is_empty() => json!({}),
+            Ok(s) => serde_json::from_str(&s)
+                .with_context(|| format!("parsing {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        let obj = data
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("{} is not a JSON object", path.display()))?;
+        let servers = obj
+            .entry("mcpServers")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("{}: mcpServers is not an object", path.display()))?;
+        servers.insert(NAME.to_owned(), json!({ "url": want }));
+        let mut serialized = serde_json::to_vec_pretty(&data)?;
+        serialized.push(b'\n');
+        crate::store::write_private(&path, &serialized)?;
+    }
+    Ok(())
+}
+
+/// Whether the client's CLI (or T3-managed Antigravity runtime) is on this computer at all.
 pub async fn installed(client: Client) -> bool {
+    if client == Client::Antigravity {
+        if locate("agy").await.is_some() {
+            return true;
+        }
+        return dirs::home_dir().is_some_and(|h| {
+            h.join(".gemini").is_dir() || h.join(".t3").join("userdata").join("providers").join("antigravity").is_dir()
+        });
+    }
     locate(client.cli()).await.is_some()
 }
 
 pub async fn registered(client: Client) -> bool {
+    if client == Client::Antigravity {
+        return dirs::home_dir().is_some_and(|h| antigravity_registered_in(&h));
+    }
     run_cli(client, &["mcp".into(), "get".into(), NAME.into()]).await.is_ok()
 }
 
 /// Adds this server to the client's user config; nothing to do when it is there already.
 pub async fn register(client: Client) -> Result<()> {
+    if client == Client::Antigravity {
+        let home = dirs::home_dir().ok_or_else(|| anyhow!("no home directory"))?;
+        return register_antigravity_in(&home);
+    }
     if registered(client).await {
         return Ok(());
     }
@@ -530,6 +616,7 @@ mod tests {
             match call {
                 Call::SleepMachine { .. } => bail!("an agent is working"),
                 Call::ResizeMachine { size, .. } => Ok(crate::machine::provision::size(&size)?.id.into()),
+                Call::DeleteMachine { .. } => bail!("delete_machine is disabled via MCP by Offices safety policy"),
                 call => Ok(format!("{call:?}")),
             }
         }
@@ -555,8 +642,9 @@ mod tests {
     async fn lists_tools_and_rejects_unknown_methods() {
         let tools = rpc("tools/list", json!({})).await["result"]["tools"].clone();
         let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 15);
-        assert!(names.contains(&"sign_in_agent") && names.contains(&"delete_machine"));
+        assert_eq!(names.len(), 14);
+        assert!(names.contains(&"sign_in_agent"));
+        assert!(!names.contains(&"delete_machine"), "delete_machine must not be advertised via MCP");
         assert_eq!(rpc("ping", json!({})).await["result"], json!({}));
         assert_eq!(rpc("resources/list", json!({})).await["error"]["code"], -32601);
     }
@@ -565,18 +653,64 @@ mod tests {
     async fn calls_tools() {
         let r = rpc("tools/call", json!({ "name": "list_machines" })).await;
         assert_eq!(r["result"], content("ListMachines".into(), false));
-        let r = rpc("tools/call", json!({ "name": "create_machine", "arguments": { "name": "dev" } })).await;
-        assert_eq!(r["result"]["content"][0]["text"], r#"CreateMachine { name: "dev", size: None, projects: [] }"#);
+        let r = rpc(
+            "tools/call",
+            json!({
+                "name": "create_machine",
+                "arguments": { "name": "poppy-desk", "size": "large", "environment": "poppy", "snapshot": "t3-poppy-v3" }
+            }),
+        )
+        .await;
+        assert_eq!(
+            r["result"]["content"][0]["text"],
+            r#"CreateMachine { name: "poppy-desk", size: Some("large"), environment: Some("poppy"), snapshot: Some("t3-poppy-v3"), projects: [] }"#
+        );
         let r = rpc("tools/call", json!({ "name": "sleep_machine", "arguments": { "machine": "dev" } })).await;
         assert_eq!(r["result"], content("an agent is working".into(), true));
         let r = rpc("tools/call", json!({ "name": "resize_machine", "arguments": { "machine": "dev", "size": "huge" } })).await;
         assert_eq!(r["result"], content("unknown size huge".into(), true));
+        let r = rpc("tools/call", json!({ "name": "delete_machine", "arguments": { "machine": "dev" } })).await;
+        assert_eq!(r["result"]["isError"], true);
+        assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("Offices safety policy"));
         for bad in [
             json!({ "name": "format_disk", "arguments": { "machine": "dev" } }),
             json!({ "name": "wake_machine", "arguments": {} }),
         ] {
             assert_eq!(rpc("tools/call", bad).await["error"]["code"], -32602);
         }
+    }
+
+    #[test]
+    fn antigravity_mcp_registration_preserves_existing_servers() {
+        let tmp = std::env::temp_dir().join(format!("t3boat-agy-test-{}", crate::proxy::auth::random_token()));
+        let primary = tmp.join(".gemini/config/mcp_config.json");
+        let t3_cfg = tmp.join(".t3/userdata/providers/antigravity/abc/config/mcp_config.json");
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(t3_cfg.parent().unwrap()).unwrap();
+        std::fs::write(&primary, r#"{"mcpServers":{"offices":{"command":"python3"}}}"#).unwrap();
+        std::fs::write(&t3_cfg, r#"{"mcpServers":{"composio":{"url":"https://connect.composio.dev/mcp"}}}"#).unwrap();
+        assert!(!antigravity_registered_in(&tmp));
+        register_antigravity_in(&tmp).unwrap();
+        assert!(antigravity_registered_in(&tmp));
+        let p: Value = serde_json::from_str(&std::fs::read_to_string(&primary).unwrap()).unwrap();
+        assert_eq!(p["mcpServers"]["t3boat"]["url"], url());
+        assert_eq!(p["mcpServers"]["offices"]["command"], "python3");
+        let t: Value = serde_json::from_str(&std::fs::read_to_string(&t3_cfg).unwrap()).unwrap();
+        assert_eq!(t["mcpServers"]["t3boat"]["url"], url());
+        assert_eq!(t["mcpServers"]["composio"]["url"], "https://connect.composio.dev/mcp");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn antigravity_mcp_registration_refuses_corrupt_or_non_utf8_config() {
+        let tmp = std::env::temp_dir().join(format!("t3boat-agy-bad-{}", crate::proxy::auth::random_token()));
+        let primary = tmp.join(".gemini/config/mcp_config.json");
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        let bad_bytes: &[u8] = &[0xff, 0xfe, b'{'];
+        std::fs::write(&primary, bad_bytes).unwrap();
+        assert!(register_antigravity_in(&tmp).is_err());
+        assert_eq!(std::fs::read(&primary).unwrap(), bad_bytes);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     async fn serve_echo() -> String {

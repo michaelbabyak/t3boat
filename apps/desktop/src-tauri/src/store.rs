@@ -15,6 +15,12 @@ pub struct Machine {
     pub sandbox_id: String,
     pub name: String,
     pub size: String,
+    /// Boat environment (domain / secret boundary), e.g. `poppy`, `territory`, `t3-babyak-lab`.
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// Initial Boat snapshot used when the machine was created (e.g. `t3-poppy-v3`).
+    #[serde(default)]
+    pub base_snapshot: Option<String>,
     /// Public HTTPS URL of the T3 server on the sandbox.
     pub upstream_url: String,
     /// Bearer token the proxy uses upstream. Never leaves this computer except to that server.
@@ -121,16 +127,42 @@ impl Store {
 }
 
 /// Atomic write of a file only its owner can read, never readable by others even briefly.
+/// Uses an exclusive (`create_new`) unique temporary path so concurrent writes never collide
+/// and an existing temp file cannot retain broader permissions.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    std::fs::create_dir_all(path.parent().expect("path has a parent"))?;
-    let tmp = path.with_extension("tmp");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(&tmp)?.write_all(bytes)?;
-    std::fs::rename(&tmp, path)?;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().expect("path has a parent");
+    std::fs::create_dir_all(parent)?;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let pid = std::process::id();
+    let (tmp, mut file) = loop {
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let candidate = parent.join(format!(".{name}.tmp.{pid}.{now}.{seq}"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        match options.open(&candidate) {
+            Ok(f) => break (candidate, f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    drop(file);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 

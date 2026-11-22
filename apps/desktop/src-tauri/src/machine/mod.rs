@@ -491,6 +491,7 @@ impl MachineRuntime {
             .create(
                 &provision::sandbox_name(&record.name),
                 &record.size,
+                record.environment.as_deref(),
                 Some(&provision::snapshot_name(&record.name, &record.id)),
             )
             .await
@@ -501,9 +502,13 @@ impl MachineRuntime {
             m.sandbox_id = sandbox;
             m.t3_version.clear();
         });
-        if let Err(e) = boat.delete(&record.sandbox_id).await {
-            tracing::warn!("deleting {}'s expired sandbox {}: {e:#}", record.id, record.sandbox_id);
-        }
+        // Offices safety guardrail: never delete the expired sandbox automatically; it is already
+        // stopped/expired ($0/hr) and can be removed manually if desired.
+        tracing::info!(
+            "restored {} onto new sandbox; prior expired sandbox {} left stopped (not auto-deleted)",
+            record.id,
+            record.sandbox_id
+        );
         Ok(())
     }
 
@@ -554,6 +559,7 @@ impl MachineRuntime {
             &desktop,
             &record.watchdog_secret,
             &provision::snapshot_name(&record.name, &record.id),
+            provision::office_env_for(record.environment.as_deref()),
             false,
         )
         .await?;

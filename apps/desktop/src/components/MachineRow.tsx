@@ -67,6 +67,7 @@ export function MachineRow({
             <span className="row-name">{m.name}</span>
           )}
           <span className="chip">{m.size}</span>
+          {m.environment ? <span className="chip">{m.environment}</span> : null}
         </div>
         <div className="row-detail" title={detail}>
           {detail}

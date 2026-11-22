@@ -91,6 +91,54 @@
   grid-template-columns: repeat(3, 1fr);
   gap: 8px;
 }
+.presets {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+.preset {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+.preset:hover {
+  border-color: var(--frame);
+}
+.preset.is-on {
+  background: var(--panel);
+  border-color: var(--accent-text);
+  box-shadow: inset 0 0 0 1px var(--accent-text);
+}
+.preset-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+.preset-spec {
+  font: 400 9.5px/1.3 var(--font-mono);
+  color: var(--muted);
+}
+.field-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.prompt-input-sm {
+  height: 34px;
+  padding: 0 9px;
+}
+.prompt-input-sm input {
+  font-size: 12.5px;
+}
 .size {
   position: relative;
   display: flex;

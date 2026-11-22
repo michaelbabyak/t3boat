@@ -1,17 +1,53 @@
 #!/usr/bin/env bash
 # Runs on a Boat sandbox, as `user`. Idempotent; also used to upgrade a machine.
-#   T3BOAT_SECRET=<watchdog-secret> provision.sh <t3-version> <sleep-after-secs> <snapshot-name> <mint-upstream-token:0|1> <name>
-# Expects watchdog.mjs next to it. Prints one JSON line: {"environmentId", "upstreamToken"?}.
+#   T3BOAT_SECRET=<watchdog-secret> provision.sh <t3-version> <sleep-after-secs> <snapshot-name> <mint-upstream-token:0|1> <name> [office-env]
+# Expects watchdog.mjs, mcp_http_bridge.py, configure_antigravity_mcp.py next to it.
+# Prints one JSON line: {"environmentId", "upstreamToken"?}.
 set -euo pipefail
 
-version="$1" sleep_after="$2" snapshot="$3" mint_upstream="$4" name="$5"
+version="$1" sleep_after="$2" snapshot="$3" mint_upstream="$4" name="$5" office_env="${6:-base}"
 secret="$T3BOAT_SECRET"
 here="$(cd "$(dirname "$0")" && pwd)"
+export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 t3="$HOME/.local/bin/t3"
 boat_dir="$HOME/.t3boat"
 units="$HOME/.config/systemd/user"
 mkdir -p "$boat_dir" "$units" "$HOME/.t3/userdata"
 chmod 700 "$boat_dir"
+
+# Antigravity CLI (agy) + Cloudflare wrangler@4 (binary only, no credentials) + secret-free MCP parity.
+if ! command -v agy >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/agy" ]; then
+  if ! curl -fsSL https://antigravity.google/cli/install.sh | bash >"$boat_dir/agy-install.log" 2>&1; then
+    echo "Antigravity CLI (agy) install failed" >&2
+    tail -n 40 "$boat_dir/agy-install.log" >&2 || true
+    exit 1
+  fi
+fi
+wrangler_major="$(wrangler --version 2>/dev/null | grep -Eo '[0-9]+' | head -n 1 || echo 0)"
+if [ "${wrangler_major:-0}" -lt 4 ] && command -v npm >/dev/null 2>&1; then
+  pfx=/usr/local
+  [ -w "$pfx/lib/node_modules" ] || pfx="$HOME/.local"
+  npm install -g --prefix "$pfx" --no-fund --no-audit wrangler@4 >"$boat_dir/wrangler-install.log" 2>&1 || true
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required to apply Offices MCP & brand-wall configuration" >&2
+  exit 1
+fi
+if [ ! -f "$here/mcp_http_bridge.py" ] || [ ! -f "$here/configure_antigravity_mcp.py" ]; then
+  echo "missing Offices MCP bridge/configurator scripts in provisioning bundle" >&2
+  exit 1
+fi
+mkdir -p "$HOME/.config/offices"
+chmod 700 "$HOME/.config/offices"
+install -m 700 "$here/mcp_http_bridge.py" "$HOME/.config/offices/mcp_http_bridge.py"
+if ! python3 "$here/configure_antigravity_mcp.py" \
+  --mode cloud \
+  --office-env "$office_env" \
+  --bridge "$HOME/.config/offices/mcp_http_bridge.py" >"$boat_dir/mcp-config.log" 2>&1; then
+  echo "Offices MCP / brand-wall configuration failed" >&2
+  tail -n 40 "$boat_dir/mcp-config.log" >&2 || true
+  exit 1
+fi
 
 # T3 server pinned to the desktop app's version, as a systemd service that survives resumes.
 # It is restarted only when something it runs on changed: a restart drops every T3 Code
@@ -25,15 +61,33 @@ if [ "$("$t3" --version 2>/dev/null || true)" != "t3 v$version" ]; then
   fi
   restart_t3=1
 fi
+agy_present=0
+if command -v agy >/dev/null 2>&1 || [ -x "$HOME/.local/bin/agy" ]; then
+  agy_present=1
+fi
 settings="$HOME/.t3/userdata/settings.json"
 before="$(cat "$settings" 2>/dev/null || true)"
-node -e '
+AGY_PRESENT="$agy_present" node -e '
   const fs = require("fs"), f = process.argv[1];
   const s = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {};
   s.linkedEnvironmentsEnabled = true;
+  if (process.env.AGY_PRESENT === "1") {
+    s.providerInstances = s.providerInstances && typeof s.providerInstances === "object" ? s.providerInstances : {};
+    const cur = s.providerInstances.antigravity && typeof s.providerInstances.antigravity === "object" ? s.providerInstances.antigravity : {};
+    s.providerInstances.antigravity = { ...cur, driver: "antigravity", displayName: "Antigravity", enabled: true };
+  }
   fs.writeFileSync(f, JSON.stringify(s, null, 2));
 ' "$settings"
 [ "$before" = "$(cat "$settings")" ] || restart_t3=1
+# Strip Gemini/Google API keys from t3code.service so Antigravity always runs on Google OAuth only.
+dropin_dir="$units/t3code.service.d"
+dropin="$dropin_dir/10-antigravity-oauth.conf"
+mkdir -p "$dropin_dir"
+want_dropin=$'[Service]\nUnsetEnvironment=GEMINI_API_KEY GOOGLE_API_KEY'
+if [ "$(cat "$dropin" 2>/dev/null || true)" != "$want_dropin" ]; then
+  printf '%s\n' "$want_dropin" >"$dropin"
+  restart_t3=1
+fi
 # The machine's name, as other devices show it (T3 Connect, linked environments). T3 reads it
 # from here as it starts; without it, they show the sandbox's hostname.
 machine_info="PRETTY_HOSTNAME=$name"
